@@ -1,94 +1,171 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
+
 import plotly.express as px
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.inspection import permutation_importance
 
-st.set_page_config(
-    page_title="HR Attrition Risk Dashboard",
-    layout="wide"
+# ------------------------------------
+# Page config
+# ------------------------------------
+st.set_page_config(page_title="HR Attrition Dashboard",
+                   layout="wide",
+                   page_icon="📊")
+
+st.title("📊 HR Attrition Risk Dashboard")
+st.write("Upload your HR dataset to begin.")
+
+# ------------------------------------
+# File Upload
+# ------------------------------------
+uploaded_file = st.file_uploader("Upload HR dataset (.csv)", type=["csv"])
+
+if uploaded_file is None:
+    st.info("👆 Please upload a CSV file to continue.")
+    st.stop()
+
+# Load data
+df = pd.read_csv(uploaded_file)
+
+# ------------------------------------
+# Preprocess
+# ------------------------------------
+df["AttritionFlag"] = df["Attrition"].map({"Yes": 1, "No": 0})
+
+drop_cols = ['EmployeeCount', 'Over18', 'StandardHours']
+df_model = df.drop(columns=[c for c in drop_cols if c in df.columns])
+
+X = df_model.drop(columns=["Attrition", "AttritionFlag"])
+y = df_model["AttritionFlag"]
+
+num_features = X.select_dtypes(include=np.number).columns.tolist()
+cat_features = [c for c in X.columns if c not in num_features]
+
+preprocess = ColumnTransformer(
+    transformers=[
+        ("num", StandardScaler(), num_features),
+        ("cat", OneHotEncoder(handle_unknown="ignore"), cat_features)
+    ]
 )
 
-# ------------------
-# LOAD DATA
-# ------------------
-@st.cache_data
-def load_data():
-    return pd.read_csv("hr_attrition_scored.csv")
+# ------------------------------------
+# Model
+# ------------------------------------
+base_clf = HistGradientBoostingClassifier(max_iter=200, random_state=42)
 
-df = load_data()
+clf = Pipeline(steps=[
+    ("pre", preprocess),
+    ("cal", CalibratedClassifierCV(base_clf, cv=3))
+])
 
-st.title("HR Attrition Risk Dashboard")
-st.markdown("This dashboard helps HR identify employees at risk of attrition and take early intervention.")
-
-# ------------------
-# SUMMARY METRICS
-# ------------------
-col1, col2, col3 = st.columns(3)
-
-with col1:
-    st.metric("Total Employees", len(df))
-
-with col2:
-    st.metric("High-Risk Employees", (df["RiskTier"] == "High").sum())
-
-with col3:
-    st.metric("Average Predicted Risk (%)",
-              round(df["AttritionRisk"].mean() * 100, 2))
-
-# ------------------
-# DEPARTMENT RISK VIEW
-# ------------------
-st.header("Department-Level Risk")
-
-dept = (
-    df.groupby("Department")
-      .agg(
-          Average_Risk=("AttritionRisk", "mean"),
-          High_Risk=("RiskTier", lambda s: (s == "High").sum()),
-          Employees=("EmployeeNumber", "count")
-      )
-      .reset_index()
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
 )
 
-dept["Average_Risk"] = dept["Average_Risk"] * 100
+clf.fit(X_train, y_train)
+
+# ------------------------------------
+# Predict full dataset
+# ------------------------------------
+df["AttritionRisk"] = clf.predict_proba(X)[:, 1]
+
+def risk_bucket(x):
+    if x >= 0.40:
+        return "High"
+    elif x >= 0.20:
+        return "Medium"
+    else:
+        return "Low"
+
+df["RiskTier"] = df["AttritionRisk"].apply(risk_bucket)
+
+# ------------------------------------
+# Dashboard Layout
+# ------------------------------------
+st.header("📌 Department-Level Risk Overview")
+
+dept_summary = df.groupby("Department").agg(
+    avg_risk=("AttritionRisk", "mean"),
+    high_risk=("RiskTier", lambda s: (s == "High").sum()),
+    headcount=("EmployeeNumber", "count")
+).reset_index()
+
+dept_summary["avg_risk"] = dept_summary["avg_risk"] * 100
 
 fig = px.bar(
-    dept,
+    dept_summary,
     x="Department",
-    y="Average_Risk",
-    color="Average_Risk",
+    y="avg_risk",
+    color="avg_risk",
     color_continuous_scale="Reds",
-    title="Average Predicted Attrition Risk (%) by Department",
+    title="Average Attrition Risk by Department (%)"
 )
-
 st.plotly_chart(fig, use_container_width=True)
 
-# ------------------
-# TOP AT-RISK EMPLOYEES
-# ------------------
-st.header("Top 20 At-Risk Employees")
+# ------------------------------------
+# High Risk Employees
+# ------------------------------------
+st.header("🔥 Highest-Risk Employees (Top 20)")
 
-top20 = (
-    df.sort_values("AttritionRisk", ascending=False)
-      .head(20)[
-          [
-            "EmployeeNumber", "Department", "JobRole", "Age", "MonthlyIncome",
-            "WorkLifeBalance", "RelationshipSatisfaction",
-            "BusinessTravel", "AttritionRisk", "RiskTier"
-          ]
-      ]
+top_risk = df.sort_values("AttritionRisk", ascending=False).head(20)
+top_risk_display = top_risk[[
+    "EmployeeNumber", "Department", "JobRole",
+    "MonthlyIncome", "WorkLifeBalance",
+    "AttritionRisk", "RiskTier"
+]]
+
+top_risk_display["AttritionRisk"] = (top_risk_display["AttritionRisk"] * 100).round(1)
+
+st.dataframe(top_risk_display)
+
+# ------------------------------------
+# Feature Importance
+# ------------------------------------
+st.header("🧠 What Drives Attrition? (Feature Importance)")
+
+perm = permutation_importance(
+    clf, X_test, y_test, n_repeats=5, random_state=42, n_jobs=-1
 )
 
-top20["AttritionRisk"] = (top20["AttritionRisk"] * 100).round(1)
+feature_names = num_features + list(
+    clf.named_steps["pre"].transformers_[1][1].get_feature_names_out(cat_features)
+)
 
-st.dataframe(top20)
+importance_df = pd.DataFrame({
+    "Feature": feature_names,
+    "Importance": perm.importances_mean
+}).sort_values("Importance", ascending=False).head(15)
 
-# ------------------
-# DOWNLOAD BUTTON
-# ------------------
-csv = df.to_csv(index=False).encode("utf-8")
+fig2 = px.bar(
+    importance_df,
+    x="Importance",
+    y="Feature",
+    orientation="h",
+    title="Top 15 Attrition Drivers"
+)
+st.plotly_chart(fig2, use_container_width=True)
+
+# ------------------------------------
+# Download scored file
+# ------------------------------------
+st.header("⬇ Download Scored Dataset")
+
+download_df = df.copy()
+download_df["AttritionRisk"] = (download_df["AttritionRisk"] * 100).round(2)
+
+csv = download_df.to_csv(index=False).encode("utf-8")
+
 st.download_button(
-    label="Download Full Scored Employee File",
-    data=csv,
-    file_name="hr_attrition_scored.csv",
-    mime="text/csv"
+    "Download Scored Employee File (CSV)",
+    csv,
+    "attrition_scored.csv",
+    "text/csv"
 )
+
+
