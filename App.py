@@ -18,10 +18,10 @@ from sklearn.preprocessing import OneHotEncoder
 st.set_page_config(
     page_title="HR Attrition Dashboard",
     layout="wide",
-    page_icon="📊",
+    page_icon="T_T",
 )
 
-st.title("📊 HR Attrition Risk Dashboard")
+st.title("HR Attrition Risk Dashboard")
 
 
 # ---------------------------------------------------------
@@ -328,3 +328,4 @@ with tab_importance:
         )
         st.plotly_chart(fig, use_container_width=True)
         st.dataframe(importance_df, use_container_width=True, hide_index=True)
+
