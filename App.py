@@ -213,7 +213,7 @@ high_threshold = st.sidebar.slider(
 # Tabs
 # ---------------------------------------------------------
 tab_dept, tab_risk, tab_importance = st.tabs(
-    ["Department Summary", "High-Risk Employees", "Feature Importance"]
+    ["Historic Data", "High-Risk Employees", "Feature Importance"]
 )
 
 # ---------------------------------------------------------
@@ -328,3 +328,4 @@ with tab_importance:
         )
         st.plotly_chart(fig, use_container_width=True)
         st.dataframe(importance_df, use_container_width=True, hide_index=True)
+
