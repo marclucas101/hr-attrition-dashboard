@@ -172,44 +172,27 @@ with tab2:
 # =========================================================
 with tab3:
     st.header("What Drives Attrition? (Feature Importance)")
+st.write("This uses pre-computed Permutation Importance from the trained model.")
 
-    st.write("This uses Permutation Importance on the trained model.")
+# Load static importance
+imp_df = pd.read_csv("feature_importance.csv")
 
-    # Safe Permutation Importance
-    try:
-        perm = permutation_importance(
-            clf, X_test, y_test,
-            n_repeats=5,
-            random_state=42,
-            n_jobs=-1
-        )
+# Top 15
+top_imp = imp_df.sort_values("importance", ascending=False).head(15)
 
-        # Extract transformed feature names
-        ohe = clf.named_steps["pre"].transformers_[1][1]
-        ohe_names = ohe.get_feature_names_out(cat_features)
-
-        feature_names = num_features + list(ohe_names)
-
-        # FIX: Align lengths
-        valid_len = min(len(feature_names), len(perm.importances_mean))
-
-        importance_df = pd.DataFrame({
-            "Feature": feature_names[:valid_len],
-            "Importance": perm.importances_mean[:valid_len]
-        }).sort_values("Importance", ascending=False)
-
-        fig_imp = px.bar(
-            importance_df.head(20),
-            x="Importance",
-            y="Feature",
-            orientation="h",
-            title="Top Drivers of Attrition",
-            color="Importance",
-            color_continuous_scale="Blues"
-        )
-
-        st.plotly_chart(fig_imp, use_container_width=True)
+fig = px.bar(
+    top_imp,
+    x="importance",
+    y="feature",
+    orientation="h",
+    title="Top Drivers of Attrition",
+    color="importance",
+    color_continuous_scale="Blues"
+)
+fig.update_layout(yaxis={'categoryorder':'total ascending'})
+st.plotly_chart(fig, use_container_width=True)
 
     except Exception as e:
         st.error("Could not compute feature importance for this dataset.")
         st.exception(e)
+
