@@ -16,9 +16,9 @@ from sklearn.inspection import permutation_importance
 # ------------------------------------
 st.set_page_config(page_title="HR Attrition Dashboard",
                    layout="wide",
-                   page_icon="📊")
+                   page_icon="🖕")
 
-st.title("📊 HR Attrition Risk Dashboard")
+st.title("HR Attrition Risk Dashboard")
 st.write("Upload your HR dataset to begin.")
 
 # ------------------------------------
@@ -27,7 +27,7 @@ st.write("Upload your HR dataset to begin.")
 uploaded_file = st.file_uploader("Upload HR dataset (.csv)", type=["csv"])
 
 if uploaded_file is None:
-    st.info("👆 Please upload a CSV file to continue.")
+    st.info("Please upload a CSV file to continue.")
     st.stop()
 
 # Load data
@@ -88,7 +88,7 @@ df["RiskTier"] = df["AttritionRisk"].apply(risk_bucket)
 # ------------------------------------
 # Dashboard Layout
 # ------------------------------------
-st.header("📌 Department-Level Risk Overview")
+st.header("Department-Level Risk Overview")
 
 dept_summary = df.groupby("Department").agg(
     avg_risk=("AttritionRisk", "mean"),
@@ -111,7 +111,7 @@ st.plotly_chart(fig, use_container_width=True)
 # ------------------------------------
 # High Risk Employees
 # ------------------------------------
-st.header("🔥 Highest-Risk Employees (Top 20)")
+st.header("Highest-Risk Employees (Top 20)")
 
 top_risk = df.sort_values("AttritionRisk", ascending=False).head(20)
 top_risk_display = top_risk[[
@@ -127,7 +127,7 @@ st.dataframe(top_risk_display)
 # ------------------------------------
 # Feature Importance
 # ------------------------------------
-st.header("🧠 What Drives Attrition? (Feature Importance)")
+st.header("What Drives Attrition? (Feature Importance)")
 
 perm = permutation_importance(
     clf, X_test, y_test, n_repeats=5, random_state=42, n_jobs=-1
@@ -167,5 +167,6 @@ st.download_button(
     "attrition_scored.csv",
     "text/csv"
 )
+
 
 
