@@ -217,10 +217,10 @@ tab_dept, tab_risk, tab_importance = st.tabs(
 )
 
 # ---------------------------------------------------------
-# Tab 1 – Department summary
+# Tab 1 – History Attrition Data
 # ---------------------------------------------------------
 with tab_dept:
-    st.subheader("Department Summary")
+    st.subheader("History Attrition Data")
 
     summary = department_summary(df)
     if not summary.empty:
@@ -328,4 +328,5 @@ with tab_importance:
         )
         st.plotly_chart(fig, use_container_width=True)
         st.dataframe(importance_df, use_container_width=True, hide_index=True)
+
 
