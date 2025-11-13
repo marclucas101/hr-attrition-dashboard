@@ -129,27 +129,44 @@ st.dataframe(top_risk_display)
 # ------------------------------------
 st.header("What Drives Attrition? (Feature Importance)")
 
-perm = permutation_importance(
-    clf, X_test, y_test, n_repeats=5, random_state=42, n_jobs=-1
-)
+try:
+    with st.spinner("Calculating feature importance..."):
+        
+        # 1. Get the fitted preprocessing transformer
+        preprocessor = model.named_steps["pre"]
+        
+        # 2. Extract final feature names dynamically
+        ohe = preprocessor.named_transformers_['cat']
+        ohe_feature_names = list(ohe.get_feature_names_out(cat_columns))
+        final_feature_names = list(num_columns) + ohe_feature_names
+        
+        # 3. Compute permutation importance
+        perm = permutation_importance(
+            model, X_test, y_test, n_repeats=10, random_state=42, n_jobs=-1
+        )
 
-feature_names = num_features + list(
-    clf.named_steps["pre"].transformers_[1][1].get_feature_names_out(cat_features)
-)
+        # 4. Build dataframe safely
+        importance_df = pd.DataFrame({
+            "Feature": final_feature_names,
+            "Importance": perm.importances_mean
+        }).sort_values("Importance", ascending=False).head(15)
+        
+        st.dataframe(importance_df)
 
-importance_df = pd.DataFrame({
-    "Feature": feature_names,
-    "Importance": perm.importances_mean
-}).sort_values("Importance", ascending=False).head(15)
+        fig = px.bar(
+            importance_df,
+            x="Importance",
+            y="Feature",
+            orientation="h",
+            title="Key Drivers of Attrition",
+            height=600
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
-fig2 = px.bar(
-    importance_df,
-    x="Importance",
-    y="Feature",
-    orientation="h",
-    title="Top 15 Attrition Drivers"
-)
-st.plotly_chart(fig2, use_container_width=True)
+except Exception as e:
+    st.error("Unable to generate importance chart. Check logs or uploaded file format.")
+    st.exception(e)
+
 
 # ------------------------------------
 # Download scored file
@@ -167,6 +184,7 @@ st.download_button(
     "attrition_scored.csv",
     "text/csv"
 )
+
 
 
 
