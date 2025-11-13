@@ -1,3 +1,8 @@
+# ----------------------------
+# HR ATTRITION DASHBOARD v3
+# Fully fixed version
+# ----------------------------
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -11,170 +16,200 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.inspection import permutation_importance
 
+# ---------------------------------------------------------
+# Page Layout
+# ---------------------------------------------------------
+st.set_page_config(
+    page_title="HR Attrition Dashboard",
+    layout="wide"
+)
 
-# ---------------------------
-# 1. TITLE + SIDEBAR UPLOAD
-# ---------------------------
-st.set_page_config(page_title="HR Attrition Dashboard", layout="wide")
-st.title("HR Attrition Risk Dashboard")
+st.title("HR Attrition Prediction Dashboard")
 
-st.sidebar.header("Upload HR Data")
-uploaded = st.sidebar.file_uploader("Upload CSV", type=["csv"])
+st.write("Upload a CSV file in IBM HR Attrition format to begin.")
 
+# ---------------------------------------------------------
+# File Upload Section
+# ---------------------------------------------------------
+uploaded = st.file_uploader("Upload your HR dataset", type=["csv"])
 
-# ---------------------------
-# 2. LOAD DATA
-# ---------------------------
-@st.cache_data
-def load_data(file):
-    df = pd.read_csv(file)
-    return df
-
-
-if uploaded:
-    df = load_data(uploaded)
-    st.success("Custom dataset loaded.")
-else:
-    # Fallback to repository CSV (must be inside GitHub repo)
-    df = load_data("hr_attrition_scored.csv")
-    st.info("Using default dataset from repository.")
-
-
-# ---------------------------
-# 3. TARGET ENCODING
-# ---------------------------
-if "Attrition" not in df.columns:
-    st.error("Dataset must contain the column 'Attrition'.")
+if uploaded is None:
+    st.info("Please upload a CSV file to continue.")
     st.stop()
 
+# Load data
+df = pd.read_csv(uploaded)
+
+# ---------------------------------------------------------
+# Validate required columns
+# ---------------------------------------------------------
+required_cols = ["Attrition"]
+
+missing = [c for c in required_cols if c not in df.columns]
+
+if missing:
+    st.error(f"Missing required column(s): {missing}")
+    st.stop()
+
+# ---------------------------------------------------------
+# Target variable
+# ---------------------------------------------------------
 df["AttritionFlag"] = df["Attrition"].map({"Yes": 1, "No": 0})
 
-
-# ---------------------------
-# 4. PREPARE DATA FOR MODEL
-# ---------------------------
-drop_cols = ["EmployeeCount", "Over18", "StandardHours", "EmployeeNumber"]
-for c in drop_cols:
-    if c in df.columns:
-        df = df.drop(columns=c)
-
-X = df.drop(columns=["AttritionFlag", "Attrition"])
 y = df["AttritionFlag"]
+X = df.drop(columns=["Attrition", "AttritionFlag"])
 
+# Identify features
 num_features = X.select_dtypes(include=np.number).columns.tolist()
 cat_features = [c for c in X.columns if c not in num_features]
 
+# ---------------------------------------------------------
+# Train/Test Split
+# ---------------------------------------------------------
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y,
+    test_size=0.2,
+    stratify=y,
+    random_state=42
+)
+
+# ---------------------------------------------------------
+# Preprocessing Pipeline
+# ---------------------------------------------------------
 preprocess = ColumnTransformer(
     transformers=[
-        ('num', StandardScaler(), num_features),
-        ('cat', OneHotEncoder(handle_unknown='ignore'), cat_features)
+        ("num", StandardScaler(), num_features),
+        ("cat", OneHotEncoder(handle_unknown="ignore"), cat_features)
     ]
 )
 
 base_model = HistGradientBoostingClassifier(random_state=42)
-model = Pipeline([
+
+clf = Pipeline(steps=[
     ("pre", preprocess),
     ("cal", CalibratedClassifierCV(base_model, cv=3))
 ])
 
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, random_state=42, stratify=y
-)
+# ---------------------------------------------------------
+# Train Model
+# ---------------------------------------------------------
+clf.fit(X_train, y_train)
 
-model.fit(X_train, y_train)
+# ---------------------------------------------------------
+# Predictions on full dataset
+# ---------------------------------------------------------
+df["AttritionRisk"] = clf.predict_proba(X)[:, 1]
 
-
-# ---------------------------
-# 5. SCORE ENTIRE DATASET
-# ---------------------------
-df["AttritionRisk"] = model.predict_proba(X)[:, 1]
-
-def bucket(p):
-    if p >= 0.40:
+def bucket(r):
+    if r >= 0.40:
         return "High"
-    elif p >= 0.20:
+    elif r >= 0.20:
         return "Medium"
     return "Low"
 
 df["RiskTier"] = df["AttritionRisk"].apply(bucket)
 
+# ---------------------------------------------------------
+# Dashboard Tabs
+# ---------------------------------------------------------
+tab1, tab2, tab3 = st.tabs(["Department Summary", "High-Risk Employees", "Feature Importance"])
 
-# ---------------------------
-# 6. DEPARTMENT SUMMARY
-# ---------------------------
-st.subheader("🏢 Department Risk Overview")
+# =========================================================
+# TAB 1 — DEPARTMENT SUMMARY
+# =========================================================
+with tab1:
+    st.header("Department Risk Summary")
 
-dept_summary = (
-    df.groupby("Department")
-      .agg(
-          Employees=("AttritionFlag", "count"),
-          Avg_Risk=("AttritionRisk", "mean"),
-          High_Risk=("RiskTier", lambda s: (s=="High").sum())
-      )
-      .reset_index()
-)
+    if "Department" not in df.columns:
+        st.warning("'Department' column not found. Cannot display department risk chart.")
+    else:
+        dept_summary = (
+            df.groupby("Department")
+            .agg(
+                Avg_Risk=("AttritionRisk", "mean"),
+                High_Risk_Count=("RiskTier", lambda s: (s == "High").sum()),
+                Employees=("AttritionRisk", "count")
+            )
+            .reset_index()
+        )
 
-fig = px.bar(
-    dept_summary,
-    x="Department",
-    y="Avg_Risk",
-    color="Avg_Risk",
-    color_continuous_scale="Reds",
-    title="Average Predicted Attrition Risk by Department"
-)
-st.plotly_chart(fig, use_container_width=True)
+        dept_summary["Avg_Risk"] = dept_summary["Avg_Risk"] * 100
 
+        fig = px.bar(
+            dept_summary,
+            x="Department",
+            y="Avg_Risk",
+            color="Avg_Risk",
+            color_continuous_scale="Reds",
+            title="Average Attrition Risk (%) by Department"
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
-# ---------------------------
-# 7. TOP RISK EMPLOYEES
-# ---------------------------
-st.subheader("Highest-Risk Employees (Top 20)")
+# =========================================================
+# TAB 2 — HIGH-RISK EMPLOYEES
+# =========================================================
+with tab2:
+    st.header("Highest-Risk Employees (Top 20)")
 
-if "JobRole" not in df.columns:
-    st.error("Dataset missing required column: JobRole")
-else:
-    top_risk = df.sort_values("AttritionRisk", ascending=False).head(20)
+    display_cols = [
+        c for c in ["EmployeeNumber", "Department", "JobRole",
+                    "MonthlyIncome", "WorkLifeBalance",
+                    "AttritionRisk", "RiskTier"]
+        if c in df.columns
+    ]
 
-    top_risk["AttritionRisk"] = (top_risk["AttritionRisk"] * 100).round(1)
+    if not display_cols:
+        st.warning("No standard HR columns found to display.")
+    else:
+        top = df.sort_values("AttritionRisk", ascending=False).head(20)
 
-    st.dataframe(
-        top_risk[
-            ["Department", "JobRole", "MonthlyIncome", "WorkLifeBalance",
-             "AttritionRisk", "RiskTier"]
-        ]
-    )
+        top["AttritionRisk"] = (top["AttritionRisk"] * 100).round(1)
 
+        st.dataframe(top[display_cols])
 
-# ---------------------------
-# 8. FEATURE IMPORTANCE FIXED
-# ---------------------------
-st.subheader("What Drives Attrition? (Feature Importance)")
+# =========================================================
+# TAB 3 — FIXED FEATURE IMPORTANCE
+# =========================================================
+with tab3:
+    st.header("What Drives Attrition? (Feature Importance)")
 
-# Correctly extract feature names AFTER one-hot encoding
-ohe = model.named_steps["pre"].transformers_[1][1]
-ohe_features = ohe.get_feature_names_out(cat_features)
-feature_names = num_features + list(ohe_features)
+    st.write("This uses Permutation Importance on the trained model.")
 
-# Compute permutation importance
-perm = permutation_importance(
-    model, X_test, y_test,
-    n_repeats=5, random_state=42, n_jobs=-1
-)
+    # Safe Permutation Importance
+    try:
+        perm = permutation_importance(
+            clf, X_test, y_test,
+            n_repeats=5,
+            random_state=42,
+            n_jobs=-1
+        )
 
-importance_df = pd.DataFrame({
-    "Feature": feature_names,
-    "Importance": perm.importances_mean
-}).sort_values("Importance", ascending=False).head(20)
+        # Extract transformed feature names
+        ohe = clf.named_steps["pre"].transformers_[1][1]
+        ohe_names = ohe.get_feature_names_out(cat_features)
 
-fig2 = px.bar(
-    importance_df.sort_values("Importance"),
-    x="Importance", y="Feature", orientation="h",
-    title="Top Factors Driving Attrition"
-)
-st.plotly_chart(fig2, use_container_width=True)
+        feature_names = num_features + list(ohe_names)
 
+        # FIX: Align lengths
+        valid_len = min(len(feature_names), len(perm.importances_mean))
 
+        importance_df = pd.DataFrame({
+            "Feature": feature_names[:valid_len],
+            "Importance": perm.importances_mean[:valid_len]
+        }).sort_values("Importance", ascending=False)
 
+        fig_imp = px.bar(
+            importance_df.head(20),
+            x="Importance",
+            y="Feature",
+            orientation="h",
+            title="Top Drivers of Attrition",
+            color="Importance",
+            color_continuous_scale="Blues"
+        )
 
+        st.plotly_chart(fig_imp, use_container_width=True)
 
-
+    except Exception as e:
+        st.error("Could not compute feature importance for this dataset.")
+        st.exception(e)
