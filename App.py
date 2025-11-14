@@ -1,4 +1,4 @@
-# app.py  – HR Attrition Risk Dashboard (train on labelled data, score current employees)
+# app.py  – HR Attrition Risk Dashboard (with on-the-fly prediction)
 
 import pathlib
 
@@ -8,7 +8,6 @@ import plotly.express as px
 import streamlit as st
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.inspection import permutation_importance
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
 
@@ -18,186 +17,171 @@ from sklearn.preprocessing import OneHotEncoder
 st.set_page_config(
     page_title="HR Attrition Dashboard",
     layout="wide",
-    page_icon="📊",
+    page_icon="T_T",
 )
 
 st.title("HR Attrition Risk Dashboard")
 
-# ---------------------------------------------------------
-# Paths
-# ---------------------------------------------------------
-HERE = pathlib.Path(__file__).parent
-
-# Historical, labelled attrition data – used to TRAIN the model
-TRAIN_FILE = HERE / "WA_Fn-UseC_-HR-Employee-Attrition.csv"
-
-# Optional sample scoring file – used only if user does not upload anything
-SAMPLE_FILE = HERE / "hr_attrition_scored.csv"  # you can also swap this to NO ATTRITION file if you like
-
+BASE_DIR = pathlib.Path(__file__).parent
+TRAIN_FILE = BASE_DIR / "WA_Fn-UseC_-HR-Employee-Attrition.csv"
+SCORE_SAMPLE_FILE = BASE_DIR / "NO ATTRITION-WA_Fn-UseC_-HR-Employee-data.csv"
 
 # ---------------------------------------------------------
-# Model training
+# Helpers
 # ---------------------------------------------------------
-@st.cache_resource(show_spinner=True)
-def train_attrition_model():
+
+
+def load_training_data() -> pd.DataFrame:
+    """Load labelled historical data with Attrition = Yes/No."""
+    if TRAIN_FILE.exists():
+        df = pd.read_csv(TRAIN_FILE)
+        if "Attrition" not in df.columns:
+            st.error(
+                "Training file found but it has no 'Attrition' column. "
+                "Please upload a valid labelled dataset."
+            )
+            st.stop()
+        return df
+
+    st.error(
+        "Default training file 'WA_Fn-UseC_-HR-Employee-Attrition.csv' "
+        "is not in the app folder. Upload a labelled training CSV in the sidebar."
+    )
+    st.stop()
+
+
+def load_scoring_data(uploaded) -> pd.DataFrame:
+    """Load current-employee data to score."""
+    if uploaded is not None:
+        return pd.read_csv(uploaded)
+
+    if SCORE_SAMPLE_FILE.exists():
+        st.sidebar.info(
+            "No file uploaded. Using bundled sample "
+            "'NO ATTRITION-WA_Fn-UseC_-HR-Employee-data.csv'."
+        )
+        return pd.read_csv(SCORE_SAMPLE_FILE)
+
+    st.warning("Upload a 'current employees' CSV on the left to score attrition risk.")
+    st.stop()
+
+
+DROP_COLS = [
+    "Attrition",
+    "AttritionFlag",
+    "AttritionRisk",
+    "RiskTier",
+    "Action",
+    "EmployeeNumber",
+    "EmployeeCount",
+    "Over18",
+    "StandardHours",
+]
+
+
+def train_model(train_df: pd.DataFrame, score_df: pd.DataFrame):
     """
-    Train a Random Forest model on historical labelled data.
+    Train a RandomForest on the labelled historical data.
 
-    Returns
-    -------
-    model : Pipeline
-        Preprocessing + classifier pipeline.
-    feature_cols : list[str]
-        Columns used as model inputs.
-    importance_df : pd.DataFrame
-        Top permutation importances for display.
+    We only use features that exist in BOTH training and scoring datasets,
+    so the model can be applied safely to the current employees file.
     """
-    if not TRAIN_FILE.exists():
+    # Target
+    if "Attrition" not in train_df.columns:
+        st.error("Training data must contain an 'Attrition' column (Yes/No).")
+        st.stop()
+
+    y = train_df["Attrition"].map({"Yes": 1, "No": 0}).astype(int)
+
+    # Base feature sets
+    train_base = train_df.drop(columns=[c for c in DROP_COLS if c in train_df.columns])
+    score_base = score_df.drop(columns=[c for c in DROP_COLS if c in score_df.columns])
+
+    # Keep only common columns (to avoid problems like 'Worklife balance')
+    common_cols = sorted(set(train_base.columns).intersection(score_base.columns))
+    if len(common_cols) == 0:
         st.error(
-            f"Training file not found: {TRAIN_FILE.name}. "
-            "Place WA_Fn-UseC_-HR-Employee-Attrition.csv in the same folder as app.py."
+            "No common feature columns found between training and scoring datasets. "
+            "Check that they have the same HR fields."
         )
         st.stop()
 
-    df_train = pd.read_csv(TRAIN_FILE)
+    X_train = train_base[common_cols]
 
-    # Create binary target
-    if "Attrition" not in df_train.columns:
-        st.error(
-            "Training file must contain an 'Attrition' column with 'Yes'/'No' values."
-        )
-        st.stop()
+    # Numeric vs categorical
+    num_cols = X_train.select_dtypes(include=["number", "bool"]).columns.tolist()
+    cat_cols = [c for c in X_train.columns if c not in num_cols]
 
-    df_train["AttritionFlag"] = df_train["Attrition"].map({"Yes": 1, "No": 0}).astype(int)
-    target_col = "AttritionFlag"
-
-    # Drop obvious IDs / constants
-    drop_cols = ["EmployeeNumber", "EmployeeCount", "Over18", "StandardHours"]
-    df_model = df_train.drop(columns=[c for c in drop_cols if c in df_train.columns])
-
-    X = df_model.drop(columns=[target_col, "Attrition"])
-    y = df_model[target_col]
-
-    num_features = X.select_dtypes(include=np.number).columns.tolist()
-    cat_features = [c for c in X.columns if c not in num_features]
-
-    feature_cols = X.columns.tolist()
-
-    preprocess = ColumnTransformer(
+    pre = ColumnTransformer(
         transformers=[
-            ("num", "passthrough", num_features),
-            ("cat", OneHotEncoder(handle_unknown="ignore"), cat_features),
+            ("num", "passthrough", num_cols),
+            ("cat", OneHotEncoder(handle_unknown="ignore"), cat_cols),
         ],
         remainder="drop",
     )
 
     rf = RandomForestClassifier(
-        n_estimators=400,
+        n_estimators=300,
         random_state=42,
         class_weight="balanced",
         n_jobs=-1,
     )
 
-    model = Pipeline([("pre", preprocess), ("rf", rf)])
-    model.fit(X, y)
+    pipe = Pipeline([("pre", pre), ("rf", rf)])
+    pipe.fit(X_train, y)
 
-    # Permutation importance on the training data
-    perm = permutation_importance(
-        model, X, y, n_repeats=5, random_state=42, n_jobs=-1
-    )
-    # Names after preprocessing
-    feature_names = model.named_steps["pre"].get_feature_names_out()
-    importances = pd.Series(perm.importances_mean, index=feature_names)
-
+    # Simple feature importance from the trained forest
+    feature_names = pipe.named_steps["pre"].get_feature_names_out()
+    importances = pipe.named_steps["rf"].feature_importances_
     importance_df = (
-        importances.sort_values(ascending=False)
-        .head(20)
-        .reset_index()
-        .rename(columns={"index": "Feature", 0: "Importance"})
+        pd.DataFrame({"Feature": feature_names, "Importance": importances})
+        .sort_values("Importance", ascending=False)
+        .head(25)
     )
 
-    return model, feature_cols, importance_df
+    return pipe, common_cols, importance_df, X_train
 
 
-model, MODEL_FEATURE_COLS, importance_df = train_attrition_model()
+def score_employees(model: Pipeline, feature_cols, score_df: pd.DataFrame) -> pd.DataFrame:
+    """Apply the trained model to the current-employee data."""
+    base = score_df.drop(columns=[c for c in DROP_COLS if c in score_df.columns])
+    X_score = base.reindex(columns=feature_cols)
 
+    proba = model.predict_proba(X_score)[:, 1]  # P(attrition = 1)
 
-# ---------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------
-def load_default_data() -> pd.DataFrame:
-    """Load sample scoring data if the user does not upload a file."""
-    if SAMPLE_FILE.exists():
-        return pd.read_csv(SAMPLE_FILE)
-    st.error(
-        "No file uploaded and sample file hr_attrition_scored.csv was not found. "
-        "Please upload a CSV on the left."
-    )
-    st.stop()
+    df_scored = score_df.copy()
+    df_scored["AttritionRisk"] = proba
 
-
-def score_and_normalise(df_raw: pd.DataFrame) -> pd.DataFrame:
-    """
-    Use the trained model to predict attrition risk for the uploaded dataset
-    and create the standard columns AttritionRisk, AttritionFlag, RiskTier, Action.
-    """
-    df = df_raw.copy()
-
-    # --- Ensure required feature columns are present -------------------------
-    missing = [c for c in MODEL_FEATURE_COLS if c not in df.columns]
-    if missing:
-        st.error(
-            "Uploaded file is missing required columns used by the model:\n"
-            + ", ".join(missing)
+    # AttritionFlag is 0 for current employees unless we actually have labels
+    if "Attrition" in df_scored.columns:
+        df_scored["AttritionFlag"] = (
+            df_scored["Attrition"].map({"Yes": 1, "No": 0}).fillna(0).astype(int)
         )
-        st.stop()
-
-    X_score = df[MODEL_FEATURE_COLS]
-    proba = model.predict_proba(X_score)[:, 1]  # probability of attrition
-    df["AttritionRisk"] = proba.astype(float)
-
-    # If actual Attrition is present, keep it. Otherwise, use a predicted flag
-    if "AttritionFlag" in df.columns:
-        df["AttritionFlag"] = df["AttritionFlag"].astype(int)
-    elif "Attrition" in df.columns:
-        df["AttritionFlag"] = df["Attrition"].map({"Yes": 1, "No": 0}).astype(int)
     else:
-        # For "NO ATTRITION" current-employee dataset: we don't know who left,
-        # so treat anyone above 50% risk as a "predicted leaver"
-        df["AttritionFlag"] = (df["AttritionRisk"] >= 0.5).astype(int)
+        df_scored["AttritionFlag"] = 0
 
-    # Risk tiers based on probability
-    if "RiskTier" not in df.columns:
-        def tier(p):
-            if p >= 0.5:
-                return "High"
-            if p >= 0.3:
-                return "Medium"
-            return "Low"
+    # Risk tier + recommended action
+    def tier(p):
+        if p >= 0.5:
+            return "High"
+        if p >= 0.3:
+            return "Medium"
+        return "Low"
 
-        df["RiskTier"] = df["AttritionRisk"].apply(tier)
+    def action_for_tier(t):
+        if t == "High":
+            return "Immediate stay interview & retention plan"
+        if t == "Medium":
+            return "Manager check-in within 1 month"
+        return "Maintain engagement"
 
-    # Recommended action per tier
-    if "Action" not in df.columns:
-        def action_for_tier(t):
-            if t == "High":
-                return "Immediate stay interview & retention plan"
-            if t == "Medium":
-                return "Manager check-in within 1 month"
-            return "Maintain engagement"
+    df_scored["RiskTier"] = df_scored["AttritionRisk"].apply(tier)
+    df_scored["Action"] = df_scored["RiskTier"].apply(action_for_tier)
 
-        df["Action"] = df["RiskTier"].apply(action_for_tier)
-
-    return df
+    return df_scored
 
 
 def department_summary(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Aggregate predictions by Department.
-
-    AttritionRate is based on AttritionFlag, which for unlabeled data is a
-    predicted flag (risk >= 50%).
-    """
     if "Department" not in df.columns:
         st.warning("Column 'Department' not found. Department summary will be empty.")
         return pd.DataFrame()
@@ -219,20 +203,23 @@ def department_summary(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------
-# Sidebar – data upload
+# Sidebar – data upload & training
 # ---------------------------------------------------------
 st.sidebar.header("1. Data")
 
-uploaded = st.sidebar.file_uploader("Upload HR attrition CSV", type=["csv"])
+scoring_file = st.sidebar.file_uploader(
+    "Upload **current employees** HR CSV (to predict attrition risk)",
+    type=["csv"],
+)
 
-if uploaded is not None:
-    df_raw = pd.read_csv(uploaded)
-    st.sidebar.success(f"Loaded file with {len(df_raw):,} rows.")
-else:
-    df_raw = load_default_data()
-    st.sidebar.info("Using bundled sample file hr_attrition_scored.csv.")
+# Load data
+train_df = load_training_data()
+score_raw = load_scoring_data(scoring_file)
+st.sidebar.success(f"Loaded scoring file with {len(score_raw):,} rows.")
 
-df = score_and_normalise(df_raw)
+# Train model on historical labelled data & score current employees
+model, feature_cols, importance_df, X_train_for_info = train_model(train_df, score_raw)
+df = score_employees(model, feature_cols, score_raw)
 
 st.sidebar.header("2. High-risk filter")
 high_threshold = st.sidebar.slider(
@@ -259,13 +246,12 @@ with tab_dept:
     summary = department_summary(df)
     if not summary.empty:
         c1, c2, c3 = st.columns(3)
-        # Overall predicted attrition rate based on AttritionFlag
-        overall_attrition = df["AttritionFlag"].mean() * 100
+        overall_attrition = df["AttritionFlag"].mean() * 100  # may be 0 for current staff
         overall_risk = df["AttritionRisk"].mean() * 100
         high_count = (df["RiskTier"] == "High").sum()
 
-        c1.metric("Predicted attrition rate", f"{overall_attrition:.1f}%")
-        c2.metric("Average risk score", f"{overall_risk:.1f}%")
+        c1.metric("Observed attrition rate", f"{overall_attrition:.1f}%")
+        c2.metric("Average predicted risk", f"{overall_risk:.1f}%")
         c3.metric("High-risk employees", f"{high_count:,}")
 
         st.dataframe(summary, use_container_width=True, hide_index=True)
@@ -276,13 +262,12 @@ with tab_dept:
             y="AvgRisk",
             color="AvgRisk",
             color_continuous_scale="Reds",
-            labels={"AvgRisk": "Average risk (%)"},
+            labels={"AvgRisk": "Average predicted risk (%)"},
             title="Average predicted attrition risk by department",
         )
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("No 'Department' column found, so this view is empty.")
-
 
 # ---------------------------------------------------------
 # Tab 2 – High-risk employees
@@ -296,7 +281,7 @@ with tab_risk:
 
     if top_high.empty:
         st.info(
-            f"No employees above {high_threshold}% risk in this dataset. "
+            f"No employees above {high_threshold}% predicted risk in this dataset. "
             "Try lowering the slider on the left."
         )
     else:
@@ -332,22 +317,21 @@ with tab_risk:
             mime="text/csv",
         )
 
-
 # ---------------------------------------------------------
-# Tab 3 – Feature importance (from training data)
+# Tab 3 – Feature importance (from Random Forest)
 # ---------------------------------------------------------
 with tab_importance:
     st.subheader("What Drives Attrition? (Feature Importance)")
     st.caption(
-        "These importances are computed from the Random Forest trained on the "
-        "historical labelled dataset WA_Fn-UseC_-HR-Employee-Attrition.csv "
-        "using permutation importance."
+        "The model is trained on the historical labelled dataset "
+        "('WA_Fn-UseC_-HR-Employee-Attrition.csv'). "
+        "Feature importances come from the trained Random Forest."
     )
 
     if importance_df is None or importance_df.empty:
         st.info(
-            "Could not compute feature importance from the training data. "
-            "Check that the training CSV is present and has an 'Attrition' column."
+            "Could not compute feature importance. "
+            "Check that the training data is valid."
         )
     else:
         fig = px.bar(
