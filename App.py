@@ -325,7 +325,7 @@ with tab_importance:
     st.caption(
         "The model is trained on the historical labelled dataset "
         "('WA_Fn-UseC_-HR-Employee-Attrition.csv'). "
-        "Feature importances come from the trained Random Forest."
+        "Feature importances come from the trained Gradient Boosting."
     )
 
     if importance_df is None or importance_df.empty:
@@ -345,3 +345,4 @@ with tab_importance:
         )
         st.plotly_chart(fig, use_container_width=True)
         st.dataframe(importance_df, use_container_width=True, hide_index=True)
+
