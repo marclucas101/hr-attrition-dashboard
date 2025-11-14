@@ -1,7 +1,6 @@
 # App.py  – HR Attrition Dashboard
 
 import pathlib
-
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -18,11 +17,10 @@ from sklearn.preprocessing import OneHotEncoder
 st.set_page_config(
     page_title="HR Attrition Dashboard",
     layout="wide",
-    page_icon="T_T",
+    page_icon="📊",
 )
 
 st.title("HR Attrition Risk Dashboard")
-
 
 # ---------------------------------------------------------
 # Helpers
@@ -33,69 +31,67 @@ SAMPLE_FILE = pathlib.Path(__file__).parent / "hr_attrition_scored.csv"
 def load_default_data() -> pd.DataFrame:
     if SAMPLE_FILE.exists():
         return pd.read_csv(SAMPLE_FILE)
-    st.error("Sample file hr_attrition_scored.csv not found in the repo. Please upload a CSV.")
+    st.error("Default file not found. Please upload a file.")
     st.stop()
 
 
 def normalise_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Standardise target / risk columns so the rest of the app can rely on them."""
     df = df.copy()
 
-    # 1) Target column
-    if "AttritionFlag" in df.columns:
-        df["AttritionFlag"] = df["AttritionFlag"].astype(int)
-    elif "Attrition" in df.columns:
-        # Expect Yes / No
-        df["AttritionFlag"] = df["Attrition"].map({"Yes": 1, "No": 0}).astype(int)
-    else:
-        # If no target, create dummy column of zeros so aggregations still run
-        df["AttritionFlag"] = 0
+    # Target detection
+    target_candidates = {
+        "AttritionFlag": "binary",
+        "Attrition": {"Yes": 1, "No": 0, "Y": 1, "N": 0},
+        "Leave": {"Yes": 1, "No": 0},
+        "Exited": {"Yes": 1, "No": 0},
+        "left": {"1": 1, "0": 0},
+    }
 
-    # 2) Risk column
-    risk_col = None
-    for c in ["AttritionRisk", "attrition_risk", "RiskScore", "score"]:
-        if c in df.columns:
-            risk_col = c
+    found = False
+    for col, mapping in target_candidates.items():
+        if col in df.columns:
+            if mapping == "binary":
+                df["AttritionFlag"] = df[col].astype(int)
+            else:
+                df["AttritionFlag"] = (
+                    df[col].astype(str).map(mapping).fillna(0).astype(int)
+                )
+            found = True
             break
 
-    if risk_col is None:
-        # Fall back: if there is no explicit probability, use AttritionFlag as a proxy
-        df["AttritionRisk"] = df["AttritionFlag"].astype(float)
-        risk_col = "AttritionRisk"
+    if not found:
+        df["AttritionFlag"] = 0  # fallback - no attrition column found
+
+    # Risk column detection
+    risk_candidates = ["AttritionRisk", "risk", "RiskScore", "Probability", "score"]
+    for col in risk_candidates:
+        if col in df.columns:
+            df["AttritionRisk"] = df[col].astype(float)
+            break
     else:
-        # Ensure float
-        df[risk_col] = df[risk_col].astype(float)
-        if risk_col != "AttritionRisk":
-            df.rename(columns={risk_col: "AttritionRisk"}, inplace=True)
+        df["AttritionRisk"] = df["AttritionFlag"].astype(float)
 
-    # 3) Risk tier
-    if "RiskTier" not in df.columns:
-        def tier(p):
-            if p >= 0.5:
-                return "High"
-            if p >= 0.3:
-                return "Medium"
-            return "Low"
+    df["AttritionRisk"] = df["AttritionRisk"].clip(0, 1)
 
-        df["RiskTier"] = df["AttritionRisk"].apply(tier)
+    # Risk Tier
+    def get_tier(r):
+        if r >= 0.5: return "High"
+        if r >= 0.3: return "Medium"
+        return "Low"
+    df["RiskTier"] = df["AttritionRisk"].apply(get_tier)
 
-    # 4) Action column
-    if "Action" not in df.columns:
-        def action_for_tier(t):
-            if t == "High":
-                return "Immediate stay interview & retention plan"
-            if t == "Medium":
-                return "Manager check-in within 1 month"
-            return "Maintain engagement"
-
-        df["Action"] = df["RiskTier"].apply(action_for_tier)
+    # Suggested actions
+    df["Action"] = df["RiskTier"].map({
+        "High": "Immediate stay interview",
+        "Medium": "Manager follow-up",
+        "Low": "Maintain engagement"
+    })
 
     return df
 
 
 def department_summary(df: pd.DataFrame) -> pd.DataFrame:
     if "Department" not in df.columns:
-        st.warning("Column 'Department' not found. Department summary will be empty.")
         return pd.DataFrame()
 
     summary = (
@@ -104,56 +100,43 @@ def department_summary(df: pd.DataFrame) -> pd.DataFrame:
             Employees=("AttritionFlag", "size"),
             AttritionRate=("AttritionFlag", "mean"),
             AvgRisk=("AttritionRisk", "mean"),
-            HighRisk=("RiskTier", lambda s: (s == "High").sum()),
+            HighRisk=("RiskTier", lambda x: (x == "High").sum())
         )
         .reset_index()
     )
-
-    summary["AttritionRate"] = (summary["AttritionRate"] * 100).round(1)
-    summary["AvgRisk"] = (summary["AvgRisk"] * 100).round(1)
+    summary["AttritionRate"] *= 100
+    summary["AvgRisk"] *= 100
     return summary
 
 
 def build_feature_importance(df: pd.DataFrame):
-    """
-    Train a simple RandomForest model on the uploaded data and compute
-    permutation importance. This is deliberately light-weight and only
-    meant to approximate drivers.
-    """
-    if "AttritionFlag" not in df.columns:
+    if df["AttritionFlag"].nunique() < 2:
         return None
 
-    # Drop obvious non-features / leakage columns
     drop_cols = [
-        "AttritionFlag",
-        "Attrition",
-        "AttritionRisk",
-        "RiskTier",
-        "Action",
-        "EmployeeNumber",
-        "EmployeeCount",
-        "Over18",
-        "StandardHours",
+        "AttritionFlag", "Attrition", "AttritionRisk",
+        "RiskTier", "Action", "EmployeeNumber",
+        "StandardHours", "Over18", "EmployeeCount"
     ]
-    X = df.drop(columns=[c for c in drop_cols if c in df.columns])
-    y = df["AttritionFlag"].astype(int)
 
-    if X.shape[1] == 0 or y.nunique() < 2:
+    X = df.drop(columns=[c for c in drop_cols if c in df.columns])
+    y = df["AttritionFlag"]
+
+    if X.shape[1] == 0:
         return None
 
-    num_cols = X.select_dtypes(include=["number", "bool"]).columns.tolist()
+    num_cols = X.select_dtypes(include=["number","bool"]).columns.tolist()
     cat_cols = [c for c in X.columns if c not in num_cols]
 
     pre = ColumnTransformer(
         transformers=[
             ("num", "passthrough", num_cols),
-            ("cat", OneHotEncoder(handle_unknown="ignore"), cat_cols),
-        ],
-        remainder="drop",
+            ("cat", OneHotEncoder(handle_unknown="ignore"), cat_cols)
+        ]
     )
 
     model = RandomForestClassifier(
-        n_estimators=200,
+        n_estimators=150,
         random_state=42,
         class_weight="balanced",
         n_jobs=-1,
@@ -162,171 +145,84 @@ def build_feature_importance(df: pd.DataFrame):
     pipe = Pipeline([("pre", pre), ("rf", model)])
     pipe.fit(X, y)
 
-    # permutation importance on the *pipeline*
-    perm = permutation_importance(
-        pipe,
-        X,
-        y,
-        n_repeats=5,
-        random_state=42,
-        n_jobs=-1,
-    )
+    perm = permutation_importance(pipe, X, y, n_repeats=5, random_state=42)
 
-    feature_names = pipe.named_steps["pre"].get_feature_names_out()
-    importances = pd.Series(perm.importances_mean, index=feature_names)
-
-    top = (
-        importances.sort_values(ascending=False)
+    names = pipe.named_steps["pre"].get_feature_names_out()
+    result = (
+        pd.DataFrame({"Feature": names, "Importance": perm.importances_mean})
+        .sort_values("Importance", ascending=False)
         .head(20)
-        .reset_index()
-        .rename(columns={"index": "Feature", 0: "Importance"})
     )
-    return top
+    return result
 
 
 # ---------------------------------------------------------
-# Sidebar – data upload
+# Sidebar
 # ---------------------------------------------------------
-st.sidebar.header("1. Data")
+st.sidebar.header("1️⃣ Upload Data")
+uploaded = st.sidebar.file_uploader(
+    "Upload HR CSV file", type=["csv"]
+)
 
-uploaded = st.sidebar.file_uploader("Upload HR attrition CSV", type=["csv"])
-
-if uploaded is not None:
-    df_raw = pd.read_csv(uploaded)
-    st.sidebar.success(f"Loaded file with {len(df_raw):,} rows.")
-else:
-    df_raw = load_default_data()
-    st.sidebar.info("Using bundled sample file hr_attrition_scored.csv.")
-
+df_raw = pd.read_csv(uploaded) if uploaded else load_default_data()
 df = normalise_columns(df_raw)
 
-st.sidebar.header("2. High-risk filter")
+st.sidebar.header("2️⃣ High-risk employee threshold")
 high_threshold = st.sidebar.slider(
-    "Minimum risk (%) for High-risk list",
-    min_value=10,
-    max_value=90,
-    value=40,
-    step=5,
+    "Minimum risk (%)",
+    10, 90, 40, step=5
 )
+risk_cut = high_threshold / 100
+
 
 # ---------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------
-tab_dept, tab_risk, tab_importance = st.tabs(
-    ["Historic Data", "High-Risk Employees", "Feature Importance"]
-)
+tab_dept, tab_risk, tab_imp = st.tabs([
+    "📈 Department Summary",
+    "⚠️ High-Risk Employees",
+    "🧠 Feature Importance"
+])
 
-# ---------------------------------------------------------
-# Tab 1 – History Attrition Data
-# ---------------------------------------------------------
+# TAB — Department
 with tab_dept:
-    st.subheader("History Attrition Data")
-
+    st.subheader("Attrition Summary by Department")
     summary = department_summary(df)
-    if not summary.empty:
-        c1, c2, c3 = st.columns(3)
-        overall_attrition = df["AttritionFlag"].mean() * 100
-        overall_risk = df["AttritionRisk"].mean() * 100
-        high_count = (df["RiskTier"] == "High").sum()
 
-        c1.metric("Overall attrition rate", f"{overall_attrition:.1f}%")
-        c2.metric("Average risk score", f"{overall_risk:.1f}%")
-        c3.metric("High-risk employees", f"{high_count:,}")
+    if summary.empty:
+        st.info("No Department column found.")
+    else:
+        st.dataframe(summary, use_container_width=True)
 
-        st.dataframe(summary, use_container_width=True, hide_index=True)
-
-        fig = px.bar(
-            summary,
-            x="Department",
-            y="AvgRisk",
-            color="AvgRisk",
-            color_continuous_scale="Reds",
-            labels={"AvgRisk": "Average risk (%)"},
-            title="Average predicted attrition risk by department",
-        )
+        fig = px.bar(summary, x="Department", y="AvgRisk",
+                     color="HighRisk", title="Avg Risk by Department")
         st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("No 'Department' column found, so this view is empty.")
 
-
-# ---------------------------------------------------------
-# Tab 2 – High-risk employees
-# ---------------------------------------------------------
+# TAB — High-Risk Employees
 with tab_risk:
-    st.subheader("Highest-Risk Employees")
+    st.subheader("High-Risk Employees")
+    high_df = df[df["AttritionRisk"] >= risk_cut].copy()
 
-    risk_cut = high_threshold / 100.0
-    df_sorted = df.sort_values("AttritionRisk", ascending=False).copy()
-    top_high = df_sorted[df_sorted["AttritionRisk"] >= risk_cut]
-
-    if top_high.empty:
-        st.info(
-            f"No employees above {high_threshold}% risk in this dataset. "
-            "Try lowering the slider on the left."
-        )
+    if high_df.empty:
+        st.info("No employees above threshold.")
     else:
-        display_cols = [
-            c
-            for c in [
-                "EmployeeNumber",
-                "Department",
-                "JobRole",
-                "Age",
-                "Gender",
-                "MonthlyIncome",
-                "AttritionRisk",
-                "RiskTier",
-                "Action",
-            ]
-            if c in top_high.columns
-        ]
-
-        table = top_high[display_cols].copy()
-        table["AttritionRisk"] = (table["AttritionRisk"] * 100).round(1)
-
-        st.write(
-            f"Employees with predicted risk ≥ **{high_threshold}%** "
-            f"({len(table):,} employees)."
-        )
-        st.dataframe(table, use_container_width=True, hide_index=True)
+        high_df["AttritionRisk"] = (high_df["AttritionRisk"] * 100).round(1)
+        st.dataframe(high_df, use_container_width=True)
 
         st.download_button(
-            "⬇️ Download high-risk list (CSV)",
-            data=table.to_csv(index=False).encode("utf-8"),
-            file_name="high_risk_employees.csv",
-            mime="text/csv",
+            "Download CSV", high_df.to_csv(index=False).encode("utf-8"),
+            file_name="high_risk_employees.csv"
         )
 
+# TAB — Feature Importance
+with tab_imp:
+    st.subheader("What Drives Attrition?")
+    result = build_feature_importance(df)
 
-# ---------------------------------------------------------
-# Tab 3 – Feature importance
-# ---------------------------------------------------------
-with tab_importance:
-    st.subheader("What Drives Attrition? (Feature Importance)")
-    st.caption(
-        "This view trains a light-weight Random Forest model on the uploaded data "
-        "and uses permutation importance to approximate key drivers."
-    )
-
-    importance_df = build_feature_importance(df)
-
-    if importance_df is None:
-        st.info(
-            "Could not compute feature importance. Make sure your data contains a "
-            "binary attrition indicator (e.g., 'AttritionFlag' or 'Attrition' Yes/No) "
-            "and enough rows."
-        )
+    if result is None:
+        st.info("Not enough attrition variation for model training.")
     else:
-        fig = px.bar(
-            importance_df.sort_values("Importance"),
-            x="Importance",
-            y="Feature",
-            orientation="h",
-            color="Importance",
-            color_continuous_scale="Blues",
-            labels={"Importance": "Importance", "Feature": "Feature"},
-        )
+        fig = px.bar(result, x="Importance", y="Feature", orientation="h")
         st.plotly_chart(fig, use_container_width=True)
-        st.dataframe(importance_df, use_container_width=True, hide_index=True)
-
+        st.dataframe(result, use_container_width=True)
 
